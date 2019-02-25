@@ -1,6 +1,6 @@
 package ai.h2o.automl;
 
-import ai.h2o.automl.UserFeedbackEvent.Stage;
+import ai.h2o.automl.EventLogItem.Stage;
 import hex.Model;
 import hex.ModelBuilder;
 import hex.ScoreKeeper.StoppingMetric;
@@ -236,7 +236,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
 
   private AtomicInteger modelCount = new AtomicInteger();  // prepare for concurrency
   private Leaderboard leaderboard;
-  private UserFeedback userFeedback;
+  private EventLog eventLog;
 
   // check that we haven't messed up the original Frame
   private Vec[] originalTrainingFrameVecs;
@@ -256,36 +256,36 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     this.jobs = new ArrayList<>();
 
     try {
-      userFeedback = new UserFeedback(this);
-      userFeedback.info(Stage.Workflow, "Project: " + projectName());
-      userFeedback.info(Stage.Workflow, "AutoML job created: " + fullTimestampFormat.format(this.startTime));
+      eventLog = new EventLog(this);
+      eventLog.info(Stage.Workflow, "Project: " + projectName());
+      eventLog.info(Stage.Workflow, "AutoML job created: " + fullTimestampFormat.format(this.startTime));
 
       workAllocations = planWork();
 
       if (null != buildSpec.input_spec.fold_column) {
-        userFeedback.warn(Stage.Workflow, "Custom fold column, " + buildSpec.input_spec.fold_column + ", will be used. nfolds value will be ignored.");
+        eventLog.warn(Stage.Workflow, "Custom fold column, " + buildSpec.input_spec.fold_column + ", will be used. nfolds value will be ignored.");
         buildSpec.build_control.nfolds = 0; //reset nfolds to Model default
       }
 
-      userFeedback.info(Stage.Workflow, "Build control seed: " + buildSpec.build_control.stopping_criteria.seed() +
+      eventLog.info(Stage.Workflow, "Build control seed: " + buildSpec.build_control.stopping_criteria.seed() +
           (buildSpec.build_control.stopping_criteria.seed() == -1 ? " (random)" : ""));
 
       handleDatafileParameters(buildSpec);
 
       if (this.buildSpec.build_control.stopping_criteria._stopping_tolerance == -1) {
         this.buildSpec.build_control.stopping_criteria.set_default_stopping_tolerance_for_frame(this.trainingFrame);
-        userFeedback.info(Stage.Workflow, "Setting stopping tolerance adaptively based on the training frame: " +
+        eventLog.info(Stage.Workflow, "Setting stopping tolerance adaptively based on the training frame: " +
             this.buildSpec.build_control.stopping_criteria._stopping_tolerance);
       } else {
-        userFeedback.info(Stage.Workflow, "Stopping tolerance set by the user: " + this.buildSpec.build_control.stopping_criteria._stopping_tolerance);
+        eventLog.info(Stage.Workflow, "Stopping tolerance set by the user: " + this.buildSpec.build_control.stopping_criteria._stopping_tolerance);
         double default_tolerance = RandomDiscreteValueSearchCriteria.default_stopping_tolerance_for_frame(this.trainingFrame);
         if (this.buildSpec.build_control.stopping_criteria._stopping_tolerance < 0.7 * default_tolerance) {
-          userFeedback.warn(Stage.Workflow, "Stopping tolerance set by the user is < 70% of the recommended default of " + default_tolerance + ", so models may take a long time to converge or may not converge at all.");
+          eventLog.warn(Stage.Workflow, "Stopping tolerance set by the user is < 70% of the recommended default of " + default_tolerance + ", so models may take a long time to converge or may not converge at all.");
         }
       }
 
       String sort_metric = buildSpec.input_spec.sort_metric == null ? null : buildSpec.input_spec.sort_metric.toLowerCase();
-      leaderboard = Leaderboard.getOrMakeLeaderboard(projectName(), userFeedback, this.leaderboardFrame, sort_metric);
+      leaderboard = Leaderboard.getOrMakeLeaderboard(projectName(), eventLog, this.leaderboardFrame, sort_metric);
     } catch (Exception e) {
       deleteWithChildren(); //cleanup potentially leaked keys
       throw e;
@@ -308,7 +308,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
 
     if (!ExtensionManager.getInstance().isCoreExtensionEnabled("XGBoost")
         || (H2O.CLOUD.size() > 1 && !Boolean.parseBoolean(System.getProperty(DISTRIBUTED_XGBOOST_ENABLED, "false")))) {
-      userFeedback.warn(Stage.ModelTraining, "AutoML: XGBoost extension is not available; skipping default XGBoost");
+      eventLog.warn(Stage.ModelTraining, "AutoML: XGBoost extension is not available; skipping default XGBoost");
       skippedAlgos.add(Algo.XGBoost);
     }
 
@@ -325,7 +325,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
             .end();
 
     for (Algo skippedAlgo : skippedAlgos) {
-      userFeedback.info(Stage.ModelTraining, "Disabling Algo: "+skippedAlgo+" as requested by the user.");
+      eventLog.info(Stage.ModelTraining, "Disabling Algo: "+skippedAlgo+" as requested by the user.");
       workAllocations.remove(skippedAlgo);
     }
 
@@ -335,7 +335,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
   @Override
   public void run() {
     stopTimeMs = System.currentTimeMillis() + Math.round(1000 * buildSpec.build_control.stopping_criteria.max_runtime_secs());
-    userFeedback.info(Stage.Workflow, "AutoML build started: " + fullTimestampFormat.format(new Date()));
+    eventLog.info(Stage.Workflow, "AutoML build started: " + fullTimestampFormat.format(new Date()));
     learn();
     stop();
   }
@@ -347,11 +347,11 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     for (Job j : jobs) j.get(); // Hold until they all completely stop.
     jobs = null;
 
-    userFeedback.info(Stage.Workflow, "AutoML build stopped: " + fullTimestampFormat.format(new Date()));
-    userFeedback.info(Stage.Workflow, "AutoML build done: built " + modelCount + " models");
+    eventLog.info(Stage.Workflow, "AutoML build stopped: " + fullTimestampFormat.format(new Date()));
+    eventLog.info(Stage.Workflow, "AutoML build done: built " + modelCount + " models");
 
-    Log.info(userFeedback.toString("User Feedback for AutoML Run " + this._key + ":"));
-    for (UserFeedbackEvent event : userFeedback.feedbackEvents)
+    Log.info(eventLog.toString("User Feedback for AutoML Run " + this._key + ":"));
+    for (EventLogItem event : eventLog.items)
       Log.info(event);
 
     if (0 < this.leaderboard().getModelKeys().length) {
@@ -395,7 +395,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
 
   public Model leader() { return (leaderboard() == null ? null : leaderboard().getLeader()); }
 
-  public UserFeedback userFeedback() { return userFeedback == null ? null : userFeedback._key.get(); }
+  public EventLog eventLog() { return eventLog == null ? null : eventLog._key.get(); }
 
   public String projectName() {
     return buildSpec == null ? null : buildSpec.project();
@@ -440,17 +440,17 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
       double[] splitRatios = null;
       if (null == this.validationFrame && null == this.leaderboardFrame) {
         splitRatios = new double[]{ 0.8, 0.1, 0.1 };
-        userFeedback.info(Stage.DataImport,
+        eventLog.info(Stage.DataImport,
             "Since cross-validation is disabled, and none of validation frame and leaderboard frame were provided, " +
                 "automatically split the training data into training, validation and leaderboard frames in the ratio 80/10/10");
       } else if (null == this.validationFrame) {
         splitRatios = new double[]{ 0.9, 0.1, 0 };
-        userFeedback.info(Stage.DataImport,
+        eventLog.info(Stage.DataImport,
             "Since cross-validation is disabled, and no validation frame was provided, " +
                 "automatically split the training data into training and validation frames in the ratio 90/10");
       } else if (null == this.leaderboardFrame) {
         splitRatios = new double[]{ 0.9, 0, 0.1 };
-        userFeedback.info(Stage.DataImport,
+        eventLog.info(Stage.DataImport,
             "Since cross-validation is disabled, and no leaderboard frame was provided, " +
                 "automatically split the training data into training and leaderboard frames in the ratio 90/10");
       }
@@ -523,24 +523,24 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     this.foldColumn = trainingFrame.vec(buildSpec.input_spec.fold_column);
     this.weightsColumn = trainingFrame.vec(buildSpec.input_spec.weights_column);
 
-    this.userFeedback.info(Stage.DataImport,
+    this.eventLog.info(Stage.DataImport,
         "training frame: "+this.trainingFrame.toString().replace("\n", " ")+" checksum: "+this.trainingFrame.checksum());
     if (null != this.validationFrame) {
-      this.userFeedback.info(Stage.DataImport,
+      this.eventLog.info(Stage.DataImport,
           "validation frame: "+this.validationFrame.toString().replace("\n", " ")+" checksum: "+this.validationFrame.checksum());
     } else {
-      this.userFeedback.info(Stage.DataImport, "validation frame: NULL");
+      this.eventLog.info(Stage.DataImport, "validation frame: NULL");
     }
     if (null != this.leaderboardFrame) {
-      this.userFeedback.info(Stage.DataImport,
+      this.eventLog.info(Stage.DataImport,
           "leaderboard frame: "+this.leaderboardFrame.toString().replace("\n", " ")+" checksum: "+this.leaderboardFrame.checksum());
     } else {
-      this.userFeedback.info(Stage.DataImport, "leaderboard frame: NULL");
+      this.eventLog.info(Stage.DataImport, "leaderboard frame: NULL");
     }
 
-    this.userFeedback.info(Stage.DataImport, "response column: "+buildSpec.input_spec.response_column);
-    this.userFeedback.info(Stage.DataImport, "fold column: "+this.foldColumn);
-    this.userFeedback.info(Stage.DataImport, "weights column: "+this.weightsColumn);
+    this.eventLog.info(Stage.DataImport, "response column: "+buildSpec.input_spec.response_column);
+    this.eventLog.info(Stage.DataImport, "fold column: "+this.foldColumn);
+    this.eventLog.info(Stage.DataImport, "weights column: "+this.weightsColumn);
 
     if (verifyImmutability) {
       // check that we haven't messed up the original Frame
@@ -570,7 +570,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
       }
       return;
     }
-    userFeedback.info(stage, name + " started");
+    eventLog.info(stage, name + " started");
     jobs.add(subJob);
 
     long lastWorkedSoFar = 0;
@@ -579,11 +579,11 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     while (subJob.isRunning()) {
       if (null != parentJob) {
         if (parentJob.stop_requested()) {
-          userFeedback.info(Stage.ModelTraining, "AutoML job cancelled; skipping " + name);
+          eventLog.info(Stage.ModelTraining, "AutoML job cancelled; skipping " + name);
           subJob.stop();
         }
         if (!ignoreTimeout && timingOut()) {
-          userFeedback.info(Stage.ModelTraining, "AutoML: out of time; skipping " + name);
+          eventLog.info(Stage.ModelTraining, "AutoML: out of time; skipping " + name);
           subJob.stop();
         }
       }
@@ -597,7 +597,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
         Grid grid = (Grid)subJob._result.get();
         int gridCount = grid.getModelCount();
         if (gridCount > gridLastCount) {
-          userFeedback.info(Stage.ModelTraining, "Built: " + gridCount + " models for search: " + name);
+          eventLog.info(Stage.ModelTraining, "Built: " + gridCount + " models for search: " + name);
           this.addModels(grid.getModelKeys());
           gridLastCount = gridCount;
         }
@@ -615,25 +615,25 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     // pick up any stragglers:
     if (JobType.HyperparamSearch == work.type) {
       if (subJob.isCrashed()) {
-        userFeedback.info(stage, name + " failed: " + subJob.ex().toString());
+        eventLog.info(stage, name + " failed: " + subJob.ex().toString());
       } else if (subJob.get() == null) {
-        userFeedback.info(stage, name + " cancelled");
+        eventLog.info(stage, name + " cancelled");
       } else {
         Grid grid = (Grid) subJob.get();
         int gridCount = grid.getModelCount();
         if (gridCount > gridLastCount) {
-          userFeedback.info(Stage.ModelTraining, "Built: " + gridCount + " models for search: " + name);
+          eventLog.info(Stage.ModelTraining, "Built: " + gridCount + " models for search: " + name);
           this.addModels(grid.getModelKeys());
         }
-        userFeedback.info(stage, name + " complete");
+        eventLog.info(stage, name + " complete");
       }
     } else if (JobType.ModelBuild == work.type) {
       if (subJob.isCrashed()) {
-        userFeedback.info(stage, name + " failed: " + subJob.ex().toString());
+        eventLog.info(stage, name + " failed: " + subJob.ex().toString());
       } else if (subJob.get() == null) {
-        userFeedback.info(stage, name + " cancelled");
+        eventLog.info(stage, name + " cancelled");
       } else {
-        userFeedback.info(stage, name + " complete");
+        eventLog.info(stage, name + " complete");
         this.addModel((Model) subJob.get());
       }
     }
@@ -722,7 +722,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     try {
       return builder.trainModelOnH2ONode();
     } catch (H2OIllegalArgumentException exception) {
-      userFeedback.warn(Stage.ModelTraining, "Skipping training of model "+key+" due to exception: "+exception);
+      eventLog.warn(Stage.ModelTraining, "Skipping training of model "+key+" due to exception: "+exception);
       return null;
     }
   }
@@ -768,13 +768,13 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     else
       searchCriteria.set_max_models(Math.min(searchCriteria.max_models(), maxAssignedModels));
 
-    userFeedback.info(Stage.ModelTraining, "AutoML: starting " + algo + " hyperparameter search");
+    eventLog.info(Stage.ModelTraining, "AutoML: starting " + algo + " hyperparameter search");
 
     Model.Parameters defaults;
     try {
       defaults = baseParms.getClass().newInstance();
     } catch (Exception e) {
-      userFeedback.warn(Stage.ModelTraining, "Internal error doing hyperparameter search");
+      eventLog.warn(Stage.ModelTraining, "Internal error doing hyperparameter search");
       throw new H2OIllegalArgumentException("Hyperparameter search can't create a new instance of Model.Parameters subclass: " + baseParms.getClass());
     }
 
@@ -889,12 +889,12 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
   private boolean exceededSearchLimits(WorkAllocations.Work work, String algo_desc, boolean ignoreLimits) {
     String fullName = algo_desc == null ? work.algo.toString() : work.algo+" ("+algo_desc+")";
     if (!ignoreLimits && timingOut()) {
-      userFeedback.info(Stage.ModelTraining, "AutoML: out of time; skipping "+fullName+" in "+work.type);
+      eventLog.info(Stage.ModelTraining, "AutoML: out of time; skipping "+fullName+" in "+work.type);
       return true;
     }
 
     if (!ignoreLimits && remainingModels() <= 0) {
-      userFeedback.info(Stage.ModelTraining, "AutoML: hit the max_models limit; skipping "+fullName+" in "+work.type);
+      eventLog.info(Stage.ModelTraining, "AutoML: hit the max_models limit; skipping "+fullName+" in "+work.type);
       return true;
     }
     return false;
@@ -1279,16 +1279,16 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     WorkAllocations.Work seWork = workAllocations.getAllocation(Algo.StackedEnsemble, JobType.ModelBuild);
     if (seWork == null) {
       this.job.update(0, "StackedEnsemble builds skipped");
-      userFeedback.info(Stage.ModelTraining, "StackedEnsemble builds skipped due to the exclude_algos option.");
+      eventLog.info(Stage.ModelTraining, "StackedEnsemble builds skipped due to the exclude_algos option.");
     } else if (allModels.length == 0) {
       this.job.update(seWork.consumeAll(), "No models built; StackedEnsemble builds skipped");
-      userFeedback.info(Stage.ModelTraining, "No models were built, due to timeouts or the exclude_algos option. StackedEnsemble builds skipped.");
+      eventLog.info(Stage.ModelTraining, "No models were built, due to timeouts or the exclude_algos option. StackedEnsemble builds skipped.");
     } else if (allModels.length == 1) {
       this.job.update(seWork.consumeAll(), "One model built; StackedEnsemble builds skipped");
-      userFeedback.info(Stage.ModelTraining, "StackedEnsemble builds skipped since there is only one model built");
+      eventLog.info(Stage.ModelTraining, "StackedEnsemble builds skipped since there is only one model built");
     } else if (!isCVEnabled() && getBlendingFrame() == null) {
       this.job.update(seWork.consumeAll(), "Cross-validation disabled by the user and no blending frame provided; StackedEnsemble build skipped");
-      userFeedback.info(Stage.ModelTraining,"Cross-validation disabled by the user and no blending frame provided; StackedEnsemble build skipped");
+      eventLog.info(Stage.ModelTraining,"Cross-validation disabled by the user and no blending frame provided; StackedEnsemble build skipped");
     } else {
       // Also stack models from other AutoML runs, by using the Leaderboard! (but don't stack stacks)
       int nonEnsembleCount = 0;
@@ -1336,7 +1336,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     if (trainingFrame != null && origTrainingFrame != null)
       Frame.deleteTempFrameAndItsNonSharedVecs(trainingFrame, origTrainingFrame);
     if (leaderboard != null) leaderboard.remove(fs);
-    if (userFeedback != null) userFeedback.remove(fs);
+    if (eventLog != null) eventLog.remove(fs);
     return super.remove_impl(fs);
   }
 
@@ -1415,7 +1415,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
 
     if (verifyImmutability) {
       // check that we haven't messed up the original Frame
-      userFeedback.debug(Stage.Workflow, "Verifying training frame immutability. . .");
+      eventLog.debug(Stage.Workflow, "Verifying training frame immutability. . .");
 
       Vec[] vecsRightNow = origTrainingFrame.vecs();
       String[] namesRightNow = origTrainingFrame.names();
@@ -1450,27 +1450,27 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
       }
 
       if (warning)
-        userFeedback.warn(Stage.Workflow, "Training frame was mutated!  This indicates a bug in the AutoML software.");
+        eventLog.warn(Stage.Workflow, "Training frame was mutated!  This indicates a bug in the AutoML software.");
       else
-        userFeedback.debug(Stage.Workflow, "Training frame was not mutated (as expected).");
+        eventLog.debug(Stage.Workflow, "Training frame was not mutated (as expected).");
 
     } else {
-      userFeedback.debug(Stage.Workflow, "Not verifying training frame immutability. . .  This is turned off for efficiency.");
+      eventLog.debug(Stage.Workflow, "Not verifying training frame immutability. . .  This is turned off for efficiency.");
     }
 
     return warning;
   }
 
-  private void giveDatasetFeedback(Frame frame, UserFeedback userFeedback, HashMap<String, Object> frameMeta) {
-    userFeedback.info(Stage.FeatureAnalysis, "Metadata for Frame: " + frame._key.toString());
+  private void giveDatasetFeedback(Frame frame, EventLog eventLog, HashMap<String, Object> frameMeta) {
+    eventLog.info(Stage.FeatureAnalysis, "Metadata for Frame: " + frame._key.toString());
     for (Map.Entry<String, Object> entry : frameMeta.entrySet()) {
       if (entry.getKey().startsWith("Dummy"))
         continue;
       Object val = entry.getValue();
       if (val instanceof Double || val instanceof Float)
-        userFeedback.info(Stage.FeatureAnalysis, entry.getKey() + ": " + String.format("%.6f", val));
+        eventLog.info(Stage.FeatureAnalysis, entry.getKey() + ": " + String.format("%.6f", val));
       else
-        userFeedback.info(Stage.FeatureAnalysis, entry.getKey() + ": " + entry.getValue());
+        eventLog.info(Stage.FeatureAnalysis, entry.getKey() + ": " + entry.getValue());
     }
   }
 
