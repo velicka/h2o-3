@@ -16,9 +16,8 @@ import water.*;
 import water.exceptions.H2OIllegalArgumentException;
 import water.fvec.Frame;
 import water.fvec.Vec;
-
+import water.util.ArrayUtils;
 import java.util.Random;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -507,5 +506,149 @@ public class GLMBasicTestMultinomial extends TestUtil {
     }
   }
 
+  @Test
+  public void testMultinomialGradientSpeedUp(){
+    Scope.enter();
+    Key parsed = Key.make("covtype");
+    Frame fr, f1, f2, f3;
+    Vec origRes = null;
+    // get new coefficients, 7 classes and 53 predictor+intercept
+    Random rand = new Random();
+    rand.setSeed(12345);
+    int nclass = 4;
+    double threshold = 1e-10;
+    DataInfo dinfo=null;
+    int numRows = 4000;
+    
+    try {
+      f1 = TestUtil.generate_enum_only(2, numRows, nclass, 0);
+      Scope.track(f1);
+      f2 = TestUtil.generate_real_only(2, numRows, 0);
+      Scope.track(f2);
+      f3 = TestUtil.generate_enum_only(1, numRows, nclass, 0);
+      Scope.track(f3);
+      fr = f1.add(f2).add(f3);  // complete frame generation
+      Scope.track(fr);
+      GLMParameters params = new GLMParameters(Family.multinomial);
+      params._response_column = f1._names[4];
+      params._ignored_columns = new String[]{};
+      params._train = parsed;
+      params._lambda = new double[]{0.5};
+      params._alpha = new double[]{0.5};
+      
+      dinfo = new DataInfo(fr, null, 1, true, DataInfo.TransformType.STANDARDIZE, DataInfo.TransformType.NONE, true, false, false, false, false, false);
+      int ncoeffPClass = dinfo.fullN()+1;
+      double[] beta = new double[nclass*ncoeffPClass];
+      for (int ind = 0; ind < beta.length; ind++) {
+        beta[ind] = rand.nextDouble();
+      }
+      double l2pen = (1.0-params._lambda[0])*params._alpha[0];
+      GLMTask.GLMMultinomialGradientSpeedUpTask gmt = new GLMTask.GLMMultinomialGradientSpeedUpTask(null,dinfo,l2pen,beta,1.0/fr.numRows()).doAll(dinfo._adaptedFrame);
+      // calculate gradient and likelihood manually
+      double[] manualGrad = new double[beta.length];
+      double manualLLH = manualLikelihoodGradient(beta, manualGrad, 1.0/fr.numRows(), l2pen, dinfo, nclass,
+              ncoeffPClass);
+      // check likelihood calculation;
+      assertEquals(manualLLH, gmt._likelihood, threshold);
+      // check gradient
+      TestUtil.checkArrays(gmt.gradient(), manualGrad, threshold);
+    } finally {
+      if (dinfo!=null)
+        dinfo.remove();
+      Scope.exit();
+    }
+  }
+  
+  public double manualLikelihoodGradient(double[] initialBeta, double[] gradient, double reg, double l2pen, 
+                                         DataInfo dinfo, int nclass, int ncoeffPClass) {
+    double likelihood = 0;
+    int numRows = (int) dinfo._adaptedFrame.numRows();
+    int respInd = dinfo._adaptedFrame.numCols()-1;
+    double[][] etas = new double[numRows][nclass];
+    double[] coeffs = new double[ncoeffPClass];
+    double[] probs = new double[nclass+1];
+    
+    // calculate the etas for each class
+    for (int rowInd=0; rowInd < numRows; rowInd++) {
+      for (int classInd = 0; classInd < nclass; classInd++) { // calculate beta*coeff+beta0
+        System.arraycopy(initialBeta, classInd*ncoeffPClass, coeffs, 0, ncoeffPClass);  // copy over coefficient for class classInd
+        etas[rowInd][classInd] = getInnerProduct(rowInd, coeffs, dinfo);
+      }
+      int yresp = (int) dinfo._adaptedFrame.vec(respInd).at(rowInd);
+      double logSumExp = computeMultinomialEtasSpeedUp(etas[rowInd], probs);
+      likelihood += logSumExp-etas[rowInd][yresp];
+      for (int classInd = 0; classInd < nclass; classInd++) { // calculate the multiplier here
+        etas[rowInd][classInd] = classInd==yresp?(probs[classInd]-1):probs[classInd];
+      }
+      // apply the multiplier and update the gradient accordingly
+      updateGradient(gradient, nclass, ncoeffPClass, dinfo, rowInd, etas[rowInd]);
+    }
+    
+    // apply learning rate and regularization constant
+    ArrayUtils.mult(gradient,reg);
+    if (l2pen > 0) {
+      for (int classInd=0; classInd < nclass; classInd++) {
+        for (int predInd = 0; predInd < dinfo.fullN(); predInd++) {  // loop through all coefficients for predictors only
+          gradient[classInd*ncoeffPClass+predInd] += l2pen*initialBeta[classInd*ncoeffPClass+predInd];
+        }
+      }
+    }
+    return likelihood;
+  }
+  
+  public void updateGradient(double[] gradient, int nclass, int ncoeffPclass, DataInfo dinfo, int rowInd, 
+                          double[] multiplier) {
+    for (int classInd = 0; classInd < nclass; classInd++) {
+      for (int cid = 0; cid < dinfo._cats; cid++) {
+        int id = dinfo.getCategoricalId(cid, dinfo._adaptedFrame.vec(cid).at(rowInd));
+        gradient[id + classInd * ncoeffPclass] += multiplier[classInd];
+      }
+      int numOff = dinfo.numStart();
+      int cidOff = dinfo._cats;
+      for (int cid = 0; cid < dinfo._nums; cid++) {
+        double scale = dinfo._normMul != null ? dinfo._normMul[cid] : 1;
+        double off = dinfo._normSub != null ? dinfo._normSub[cid] : 0;
+        gradient[numOff + cid + classInd * ncoeffPclass] += multiplier[classInd] * 
+                (dinfo._adaptedFrame.vec(cid + cidOff).at(rowInd)-off)*scale;
+      }
+      // fix the intercept term
+      gradient[(classInd + 1) * ncoeffPclass - 1] += multiplier[classInd];
+    }
+  }
 
+  public double getInnerProduct(int rowInd, double[] coeffs, DataInfo dinfo) {
+    double innerP = coeffs[coeffs.length-1];  // add the intercept term;
+
+    for (int predInd = 0; predInd < dinfo._cats; predInd++) { // categorical columns
+      int id = dinfo.getCategoricalId(predInd, (int) dinfo._adaptedFrame.vec(predInd).at(rowInd));
+      innerP += coeffs[id];
+    }
+
+    int numOff = dinfo.numStart();
+    int cidOff = dinfo._cats;
+    for (int cid=0; cid < dinfo._nums; cid++) {
+      double scale = dinfo._normMul!=null?dinfo._normMul[cid]:1;
+      double off = dinfo._normSub != null?dinfo._normSub[cid]:0;
+      innerP += coeffs[cid+numOff]*(dinfo._adaptedFrame.vec(cid+cidOff).at(rowInd)-off)*scale;
+    }
+    
+    return innerP;
+  }
+
+
+  // This method needs to calculate Pr(yi=c) for each class c and to 1/(sum of all exps
+  public double  computeMultinomialEtasSpeedUp(double [] etas, double [] exps) {
+    double sumExp = 0;
+    int K = etas.length;
+    for(int c = 0; c < K; ++c) { // calculate pr(yi=c) for each class
+      double x = Math.exp(etas[c]);
+      sumExp += x;
+      exps[c] = x;
+    }
+    double reg = 1.0/(sumExp);
+    exps[K] = reg;  // store 1/(sum of exp)
+    for(int c = 0; c < K; ++c)  // calculate pr(yi=c) for each class
+      exps[c] *= reg;
+    return Math.log(sumExp);
+  }
 }
