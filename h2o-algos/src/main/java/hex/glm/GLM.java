@@ -675,9 +675,6 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
               ls = new MoreThuente(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.ginfoMultinomial(c));
             } else
               ls = new SimpleBacktrackingLS(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.l1pen());
-/*            LineSearchSolver ls = (_state.l1pen() == 0)
-                    ? new MoreThuente(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.ginfoMultinomial(c))
-                    : new SimpleBacktrackingLS(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.l1pen());*/
 
             new GLMMultinomialUpdate(_state.activeDataMultinomial(), _job._key, beta, c).doAll(_state.activeDataMultinomial()._adaptedFrame);
             ComputationState.GramXY gram = _state.computeGram(_state.betaMultinomial(c, beta), s);
@@ -702,6 +699,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
 
       if (s.equals(Solver.COORDINATE_DESCENT)) {
         fitCOD_multinomial(s);
+      } else if (s.equals(Solver.IRLSM_SPEEDUP)) {
+        fitIRLSMSPEEDUP_multinomial(s);
       } else {
         double[] beta = _state.betaMultinomial();
         do {
@@ -733,6 +732,40 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
           _state.setActiveClass(-1);
         } while (progress(beta, _state.gslvr().getGradient(beta)));
       }
+    }
+
+    private void fitIRLSMSPEEDUP_multinomial(Solver s) {
+      assert _dinfo._responses == 3 : "IRLSM for multinomial needs extra information encoded in additional reponses, expected 3 response vecs, got " + _dinfo._responses;
+
+      double[] beta = _state.betaMultinomial(); // full length multinomial coefficients all stacked up
+      do {
+        beta = beta.clone();
+        int c=0;
+        boolean onlyIcpt = _state.activeDataMultinomial(c).fullN() == 0;
+        _state.setActiveClass(c);
+        LineSearchSolver ls = (_state.l1pen() == 0)
+                  ? new MoreThuente(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.ginfoMultinomial(c))
+                  : new SimpleBacktrackingLS(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.l1pen());
+
+          long t1 = System.currentTimeMillis();
+          new GLMMultinomialUpdate(_state.activeDataMultinomial(), _job._key, beta, c).doAll(_state.activeDataMultinomial()._adaptedFrame);
+          long t2 = System.currentTimeMillis();
+          ComputationState.GramXY gram = _state.computeGram(ls.getX(), s);
+          long t3 = System.currentTimeMillis();
+          double[] betaCnd = ADMM_solve(gram.gram, gram.xy);
+
+          long t4 = System.currentTimeMillis();
+          if (!onlyIcpt && !ls.evaluate(ArrayUtils.subtract(betaCnd, ls.getX(), betaCnd))) {
+            Log.info(LogMsg("Ls failed " + ls));
+            continue;
+          }
+          long t5 = System.currentTimeMillis();
+          _state.setBetaMultinomial(c, beta, ls.getX());
+          // update multinomial
+          Log.info(LogMsg("computed in " + (t2 - t1) + "+" + (t3 - t2) + "+" + (t4 - t3) + "+" + (t5 - t4) + "=" + (t5 - t1) + "ms, step = " + ls.step() + ((_lslvr != null) ? ", l1solver " + _lslvr : "")));
+
+        _state.setActiveClass(-1);
+      } while (progress(beta, _state.gslvr().getGradient(beta)));
     }
 
     // use regular gradient descend here.  Need to figure out how to adjust for the alpha, lambda for the elastic net
@@ -1245,12 +1278,12 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
         double maxRow = ArrayUtils.maxValue(nb);
         double sumExp = 0;
         if (_parms._family == Family.multinomial) {
-          int P = _dinfo.fullN();
-          int N = _dinfo.fullN() + 1;
+          int P = _dinfo.fullN();       // number of predictors
+          int N = _dinfo.fullN() + 1;   // number of GLM coefficients per class
           for (int i = 1; i < _nclass; ++i)
             sumExp += Math.exp(nb[i * N + P] - maxRow);
         }
-        Vec [] vecs = _dinfo._adaptedFrame.anyVec().makeDoubles(2, new double[]{sumExp,maxRow});
+        Vec [] vecs = _dinfo._adaptedFrame.anyVec().makeDoubles(2, new double[]{sumExp,maxRow});  // store sum exp and maxRow
         if(_parms._lambda_search && _parms._is_cv_model) {
           Scope.untrack(vecs[0]._key, vecs[1]._key);
           removeLater(vecs[0]._key,vecs[1]._key);
