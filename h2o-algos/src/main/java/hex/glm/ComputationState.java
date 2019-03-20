@@ -643,6 +643,7 @@ public final class ComputationState {
     }
   }
 
+  // activeData contains only active columns of one class
   protected GramXY computeNewGram(DataInfo activeData, double [] beta, GLMParameters.Solver s){
     double obj_reg = _parms._obj_reg;
     if(_glmw == null) _glmw = new GLMModel.GLMWeightsFun(_parms);
@@ -666,7 +667,7 @@ public final class ComputationState {
 
 
   // get cached gram or incrementally update or compute new one
-  public GramXY computeGram(double [] beta, GLMParameters.Solver s){
+  public GramXY computeGram(double [] beta, GLMParameters.Solver s){ // beta can contain coeff of all classes
     double obj_reg = _parms._obj_reg;
     boolean weighted = _parms._family != Family.gaussian || _parms._link != GLMParameters.Link.identity;
     if(_parms._family == Family.multinomial) // no caching

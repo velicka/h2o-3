@@ -757,7 +757,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
           ls[cIndex] = (_state.l1pen() == 0)
                   ? new MoreThuente(_state.gslvrMultinomial(cIndex), _state.betaMultinomial(cIndex,beta), 
                   _state.ginfoMultinomial(cIndex), beta)
-                  : new SimpleBacktrackingLS(_state.gslvrMultinomial(cIndex), _state.betaMultinomial(cIndex, beta), _state.l1pen());
+                  : new SimpleBacktrackingLS(_state.gslvrMultinomial(cIndex), _state.betaMultinomial(cIndex, beta),
+                  _state.l1pen(), beta);
 
 
           long t1 = System.currentTimeMillis();
