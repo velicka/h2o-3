@@ -713,6 +713,7 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
                     : new SimpleBacktrackingLS(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.l1pen());
 
             long t1 = System.currentTimeMillis();
+            // keep this even though it only calculate prob(yi=c) but I need the sum of exp
             new GLMMultinomialUpdate(_state.activeDataMultinomial(), _job._key, beta, c).doAll(_state.activeDataMultinomial()._adaptedFrame);
             long t2 = System.currentTimeMillis();
             ComputationState.GramXY gram = _state.computeGram(ls.getX(), s);
@@ -739,30 +740,46 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
 
       double[] beta = _state.betaMultinomial(); // full length multinomial coefficients all stacked up
       do {
-        beta = beta.clone();
+        beta = beta.clone();  // full length coeffs
         int c=0;
-        boolean onlyIcpt = _state.activeDataMultinomial(c).fullN() == 0;
+        
+        // check and walk through all classes
+        boolean onlyIcpt = true; 
+        for (int classInd = 0; classInd < _nclass; classInd++) {
+          onlyIcpt = onlyIcpt && (_state.activeDataMultinomial(c).fullN() == 0);
+          if (!onlyIcpt)
+            break;
+        }
         _state.setActiveClass(c);
-        LineSearchSolver ls = (_state.l1pen() == 0)
-                  ? new MoreThuente(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.ginfoMultinomial(c))
-                  : new SimpleBacktrackingLS(_state.gslvrMultinomial(c), _state.betaMultinomial(c, beta), _state.l1pen());
+        // generate an array of ls
+        LineSearchSolver[] ls = new LineSearchSolver[_nclass];
+        for (int cIndex=0; cIndex < _nclass; cIndex++)
+          ls[cIndex] = (_state.l1pen() == 0)
+                  ? new MoreThuente(_state.gslvrMultinomial(cIndex), _state.betaMultinomial(cIndex,beta), 
+                  _state.ginfoMultinomial(cIndex), beta)
+                  : new SimpleBacktrackingLS(_state.gslvrMultinomial(cIndex), _state.betaMultinomial(cIndex, beta), _state.l1pen());
+
 
           long t1 = System.currentTimeMillis();
-          new GLMMultinomialUpdate(_state.activeDataMultinomial(), _job._key, beta, c).doAll(_state.activeDataMultinomial()._adaptedFrame);
+          // generate prediction output of each class and store results in _adaptedFrame
+          new GLMMultinomialUpdate(_state.activeDataMultinomial(), 
+                  _job._key, beta, c).doAll(_state.activeDataMultinomial()._adaptedFrame);
+        new GLMMultinomialUpdate(_state.activeDataMultinomial(),
+                _job._key, beta, c).doAll(_state.activeDataMultinomial()._adaptedFrame);
           long t2 = System.currentTimeMillis();
-          ComputationState.GramXY gram = _state.computeGram(ls.getX(), s);
+          ComputationState.GramXY gram = _state.computeGram(ls[c].get_betaAll(), s); // use ls.getX() to get only one class of coeffs.
           long t3 = System.currentTimeMillis();
-          double[] betaCnd = ADMM_solve(gram.gram, gram.xy);
+   //       double[] betaCnd = ADMM_solve(gram.gram, gram.xy);
 
           long t4 = System.currentTimeMillis();
-          if (!onlyIcpt && !ls.evaluate(ArrayUtils.subtract(betaCnd, ls.getX(), betaCnd))) {
+        /*  if (!onlyIcpt && !ls.evaluate(ArrayUtils.subtract(betaCnd, ls.getX(), betaCnd))) {
             Log.info(LogMsg("Ls failed " + ls));
             continue;
-          }
+          } */
           long t5 = System.currentTimeMillis();
-          _state.setBetaMultinomial(c, beta, ls.getX());
+       //   _state.setBetaMultinomial(c, beta, ls.getX());
           // update multinomial
-          Log.info(LogMsg("computed in " + (t2 - t1) + "+" + (t3 - t2) + "+" + (t4 - t3) + "+" + (t5 - t4) + "=" + (t5 - t1) + "ms, step = " + ls.step() + ((_lslvr != null) ? ", l1solver " + _lslvr : "")));
+       //   Log.info(LogMsg("computed in " + (t2 - t1) + "+" + (t3 - t2) + "+" + (t4 - t3) + "+" + (t5 - t4) + "=" + (t5 - t1) + "ms, step = " + ls.step() + ((_lslvr != null) ? ", l1solver " + _lslvr : "")));
 
         _state.setActiveClass(-1);
       } while (progress(beta, _state.gslvr().getGradient(beta)));

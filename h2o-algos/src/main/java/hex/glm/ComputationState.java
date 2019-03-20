@@ -280,6 +280,21 @@ public final class ComputationState {
     };
   }
 
+/*  public GradientSolver gslvrMultinomial() {
+    final double [] fullbeta = _beta.clone();
+    return new GradientSolver() {
+      @Override
+      public GradientInfo getGradient(double[] beta) {
+      //  fillSubRange(_activeData.fullN()+1,c,_activeDataMultinomial[c].activeCols(),beta,fullbeta);
+        GLMGradientInfo fullGinfo =  _gslvr.getGradient(fullbeta);
+        return new GLMSubsetGinfo(fullGinfo,_activeData.fullN()+1,c,_activeDataMultinomial[c].activeCols());
+      }
+      @Override
+      public GradientInfo getObjective(double[] beta) {return getGradient(beta);}
+    };
+  }*/
+
+
   public void setBetaMultinomial(int c, double [] beta, double [] bc) {
     if(_u != null) Arrays.fill(_u,0);
     fillSubRange(_activeData.fullN()+1,c,_activeDataMultinomial[c].activeCols(),bc,beta);
